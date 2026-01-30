@@ -9,6 +9,17 @@
   },
   "functionTimeout": "00:10:00",
   "extensions": {
+    "http": {
+      "routePrefix": "api",
+      "maxOutstandingRequests": 200,
+      "maxConcurrentRequests": 100,
+      "dynamicThrottlesEnabled": true,
+      "customHeaders": {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "X-XSS-Protection": "1; mode=block"
+      }
+    },
     "durableTask": {
       "maxConcurrentActivityFunctions": 1,
       "maxConcurrentOrchestratorFunctions": 5,
