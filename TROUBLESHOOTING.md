@@ -20,8 +20,7 @@ This repository now includes proper HTTP extensions configuration in `host.json`
    - Example: `https://your-cipp-app.azurestaticapps.net`
    - For multiple environments, add each URL separately
 5. Click **Save**
-6. Wait 1-2 minutes for changes to propagate
-7. Restart your Function App for good measure
+6. Wait 1-2 minutes for changes to propagate (changes take effect immediately, but propagation ensures consistency)
 
 **Security Note**: Do NOT use `*` (allow all origins) in production. Always specify exact origins.
 
