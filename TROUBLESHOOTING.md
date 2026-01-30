@@ -66,6 +66,7 @@ To verify the Function App itself is working:
 - [CIPP Documentation](https://docs.cipp.app)
 - [Azure Functions CORS Documentation](https://learn.microsoft.com/en-us/azure/azure-functions/functions-how-to-use-azure-function-app-settings#cors)
 - [Azure Static Web Apps Documentation](https://learn.microsoft.com/en-us/azure/static-web-apps/)
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** - Branch strategy and deployment guide
 
 ## Other Common Issues
 
@@ -83,6 +84,7 @@ To verify the Function App itself is working:
 - Verify GitHub Actions workflows completed successfully
 - Check for any errors in workflow logs
 - Ensure all required secrets are set in GitHub repository settings
+- **See [DEPLOYMENT.md](DEPLOYMENT.md) for complete branch and deployment strategy**
 
 ---
 
