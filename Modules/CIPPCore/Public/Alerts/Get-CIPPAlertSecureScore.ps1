@@ -39,8 +39,10 @@ function Get-CippAlertSecureScore {
                 $SecureScoreResult = @()
             }
         } 
-        Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $SecureScoreResult -PartitionKey SecureScore
+        if ($SecureScoreResult) {
+            Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $SecureScoreResult -PartitionKey SecureScore
+        }
     } catch {
-        Write-AlertMessage -tenant $($TenantFilter) -message "Could not get Secure Score for $($TenantFilter): $(Get-NormalizedError -message $_.Exception.message)"
+        Write-LogMessage -API 'Alerts' -tenant $($TenantFilter) -message "Could not get Secure Score for $($TenantFilter): $(Get-NormalizedError -message $_.Exception.message)" -sev Error
     }
 }
