@@ -23,9 +23,9 @@ function Invoke-ExecCippUpdate {
         $ResultState = 'success'
         Write-LogMessage -headers $Request.Headers -API $APIName -message "Triggered update for CIPP $Type ($($UpdateResult.RepoPath))" -Sev 'Info'
     } catch {
-        $ResultMessage = "Failed to update CIPP $Type`: $($_.Exception.Message)"
+        $ResultMessage = "Failed to update CIPP ${Type}: $($_.Exception.Message)"
         $ResultState = 'error'
-        Write-LogMessage -headers $Request.Headers -API $APIName -message "Failed to trigger update for CIPP $Type`: $($_.Exception.Message)" -Sev 'Error' -LogData (Get-CippException -Exception $_)
+        Write-LogMessage -headers $Request.Headers -API $APIName -message "Failed to trigger update for CIPP ${Type}: $($_.Exception.Message)" -Sev 'Error' -LogData (Get-CippException -Exception $_)
     }
 
     $Body = @{

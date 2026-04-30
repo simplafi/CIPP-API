@@ -63,7 +63,8 @@ function Invoke-CIPPGitHubUpdate {
         $Branch = $SourceControl.properties.branch ?? 'main'
         $WorkflowFile = 'azure-function.yml'
     } else {
-        $SWAName = $env:WEBSITE_SITE_NAME -replace '(?i)cipp', 'CIPP-SWA-'
+        # Replace only the leading 'cipp' prefix (case-insensitive) to form the SWA name
+        $SWAName = $env:WEBSITE_SITE_NAME -replace '(?i)^cipp', 'CIPP-SWA'
         $SWAUri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Web/staticSites/$SWAName?api-version=2022-03-01"
         $SWA = New-CIPPAzRestRequest -Uri $SWAUri -Method GET
 
