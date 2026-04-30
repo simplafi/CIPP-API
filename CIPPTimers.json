@@ -249,5 +249,14 @@
     "Priority": 24,
     "RunOnProcessor": true,
     "IsSystem": true
+  },
+  {
+    "Id": "2a3b4c5d-6e7f-8a9b-0c1d-2e3f4a5b6c7d",
+    "Command": "Start-CIPPAutoUpdateTimer",
+    "Description": "Timer to automatically update CIPP components when a newer upstream version is available",
+    "Cron": "0 0 5 * * *",
+    "Priority": 25,
+    "RunOnProcessor": true,
+    "IsSystem": true
   }
 ]
