@@ -91,7 +91,11 @@ function Invoke-CIPPGitHubUpdate {
     try {
         $SyncResult = Invoke-GitHubApiRequest -Path "repos/$RepoPath/merge-upstream" -Method POST -Body @{ branch = $Branch }
     } catch {
-        throw "Failed to sync CIPP $Type fork with upstream: $($_.Exception.Message)"
+        if ($_.Exception.Message -match '409') {
+            $SyncResult = [PSCustomObject]@{ merge_type = 'none' }
+        } else {
+            throw "Failed to sync CIPP $Type fork with upstream: $($_.Exception.Message)"
+        }
     }
 
     if ($SyncResult.merge_type -eq 'none') {
