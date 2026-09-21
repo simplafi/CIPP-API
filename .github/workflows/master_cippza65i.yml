@@ -19,7 +19,13 @@ jobs:
     steps:
       - name: 'Checkout GitHub Action'
         uses: actions/checkout@v4
-      
+
+      # Same build upstream runs in publish_release.yml: compiles the CIPP modules into
+      # single-file .psm1s and generates Config/function-{permissions,parameters}.json.
+      - name: 'Build and stage modules'
+        shell: pwsh
+        run: ./Tools/Build-DevApiModules.ps1
+
       - name: 'Run Azure Functions Action'
         uses: Azure/functions-action@v1
         id: fa
