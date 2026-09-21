@@ -23,17 +23,16 @@ function Remove-CippKeyVaultSecret {
 
     try {
         if (-not $VaultName) {
-            if ($env:WEBSITE_DEPLOYMENT_ID) {
-                $VaultName = ($env:WEBSITE_DEPLOYMENT_ID -split '-')[0]
-            } else {
-                throw 'VaultName not provided and WEBSITE_DEPLOYMENT_ID environment variable not set'
+            $VaultName = Get-CippKeyVaultName
+            if (-not $VaultName) {
+                throw 'VaultName not provided and could not be derived (WEBSITE_SITE_NAME / WEBSITE_DEPLOYMENT_ID not set)'
             }
         }
 
         $token = Get-CIPPAzIdentityToken -ResourceUrl 'https://vault.azure.net'
         $uri = "https://$VaultName.vault.azure.net/secrets/$Name`?api-version=7.4"
 
-        $response = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $token" } -Method Delete -ErrorAction Stop
+        $response = Invoke-CIPPRestMethod -Uri $uri -Headers @{ Authorization = "Bearer $token" } -Method Delete -ErrorAction Stop
 
         return @{
             Name      = $Name

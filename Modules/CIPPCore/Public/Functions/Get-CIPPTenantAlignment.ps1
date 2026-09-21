@@ -27,6 +27,7 @@ function Get-CIPPTenantAlignment {
     $TemplateTable = Get-CippTable -tablename 'templates'
     $TemplateFilter = "PartitionKey eq 'StandardsTemplateV2'"
     $TenantGroups = Get-TenantGroups
+    $DriftTable = Get-CippTable -tablename 'tenantDrift'
 
     try {
         # Get all standard templates
@@ -68,7 +69,54 @@ function Get-CIPPTenantAlignment {
             $Tenants = Get-Tenants -IncludeErrors
             $AllStandards | Where-Object { $_.PartitionKey -in $Tenants.defaultDomainName }
         }
-        $TagTemplates = Get-CIPPAzDataTableEntity @TemplateTable
+        $TagTemplates = Get-CIPPAzDataTableEntity @TemplateTable -Filter "PartitionKey eq 'IntuneTemplate'"
+        # Build a hashtable indexed by Package for O(1) tag lookup
+        $TemplatesByPackage = @{}
+        foreach ($t in $TagTemplates) {
+            if ($t.Package) {
+                if (-not $TemplatesByPackage.ContainsKey($t.Package)) {
+                    $TemplatesByPackage[$t.Package] = [System.Collections.Generic.List[object]]::new()
+                }
+                $TemplatesByPackage[$t.Package].Add($t)
+            }
+        }
+        $CATagTemplates = Get-CIPPAzDataTableEntity @TemplateTable -Filter "PartitionKey eq 'CATemplate'"
+        $CATemplatesByPackage = @{}
+        foreach ($t in $CATagTemplates) {
+            if ($t.Package) {
+                if (-not $CATemplatesByPackage.ContainsKey($t.Package)) {
+                    $CATemplatesByPackage[$t.Package] = [System.Collections.Generic.List[object]]::new()
+                }
+                $CATemplatesByPackage[$t.Package].Add($t)
+            }
+        }
+        # Every id a standards template can legitimately reference for each template type: the
+        # RowKey, the GUID column (the picker surfaces that one) and the bare guid of a built-in
+        # '<guid>.<Type>.json' row. A reference that matches none of these points at a template that
+        # was deleted, and its standard can never get a report row - it would sit at NOT FOUND
+        # forever with nothing naming the culprit.
+        function Get-TemplateIdSet {
+            param($Rows)
+            $Set = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($Row in @($Rows)) {
+                if ($Row.RowKey) {
+                    [void]$Set.Add([string]$Row.RowKey)
+                    if ($Row.RowKey -match '^([0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})\.') { [void]$Set.Add($Matches[1]) }
+                }
+                if ($Row.GUID) { [void]$Set.Add([string]$Row.GUID) }
+            }
+            return , $Set
+        }
+        $KnownIntuneTemplateIds = Get-TemplateIdSet -Rows $TagTemplates
+        $KnownCATemplateIds = Get-TemplateIdSet -Rows $CATagTemplates
+        $KnownReusableTemplateIds = Get-TemplateIdSet -Rows (Get-CIPPAzDataTableEntity @TemplateTable -Filter "PartitionKey eq 'IntuneReusableSettingTemplate'")
+        function Get-MissingTemplateMessage {
+            param([string]$Kind, $Reference, [System.Collections.Generic.HashSet[string]]$KnownIds)
+            $Id = [string]$Reference.value
+            if ([string]::IsNullOrWhiteSpace($Id) -or $KnownIds.Contains($Id)) { return $null }
+            $Name = if ($Reference.label) { "'$($Reference.label)' " } else { '' }
+            return "$Kind template $Name($Id) no longer exists in the template library. Remove it from this standards template or select the template again."
+        }
         # Build tenant standards data structure
         $tenantData = @{}
         foreach ($Standard in $Standards) {
@@ -87,7 +135,8 @@ function Get-CIPPTenantAlignment {
                 }
             }
 
-            if ($Tenant -and -not $tenantData.ContainsKey($Tenant)) {
+            if (-not $Tenant) { continue }
+            if (-not $tenantData.ContainsKey($Tenant)) {
                 $tenantData[$Tenant] = @{}
             }
             $tenantData[$Tenant][$FieldName] = @{
@@ -101,6 +150,7 @@ function Get-CIPPTenantAlignment {
         $TenantStandards = $tenantData
 
         $Results = [System.Collections.Generic.List[object]]::new()
+        $TenantDriftStatusesCache = @{}
 
         # Process each template against all tenants
         foreach ($Template in $Templates) {
@@ -195,17 +245,21 @@ function Get-CIPPTenantAlignment {
                             [PSCustomObject]@{
                                 StandardId       = $IntuneStandardId
                                 ReportingEnabled = $IntuneReportingEnabled
+                                MissingTemplate  = Get-MissingTemplateMessage -Kind 'Intune' -Reference $IntuneTemplate.TemplateList -KnownIds $KnownIntuneTemplateIds
                             }
                         }
 
                         if ($IntuneTemplate.'TemplateList-Tags') {
                             foreach ($Tag in $IntuneTemplate.'TemplateList-Tags') {
-                                Write-Host "Processing Intune Tag: $($Tag.value)"
                                 $IntuneActions = if ($IntuneTemplate.action) { $IntuneTemplate.action } else { @() }
                                 $IntuneReportingEnabled = ($IntuneActions | Where-Object { $_.value -and ($_.value.ToLower() -eq 'report' -or $_.value.ToLower() -eq 'remediate') }).Count -gt 0
-                                $TagTemplate = $TagTemplates | Where-Object -Property package -EQ $Tag.value
+                                $TagValue = if ($Tag.value) { $Tag.value } else { $Tag }
+                                $TagTemplate = if ($TagValue -and $TemplatesByPackage.ContainsKey($TagValue)) { $TemplatesByPackage[$TagValue] } else { @() }
                                 $TagTemplate | ForEach-Object {
-                                    $TagStandardId = "standards.IntuneTemplate.$($_.GUID)"
+                                    # RowKey, not the GUID column: the standards engine deploys tag members with
+                                    # TemplateList.value = RowKey and writes the compare row under that id, so the
+                                    # expected id must match it. The GUID column can be missing or stale.
+                                    $TagStandardId = "standards.IntuneTemplate.$($_.RowKey)"
                                     [PSCustomObject]@{
                                         StandardId       = $TagStandardId
                                         ReportingEnabled = $IntuneReportingEnabled
@@ -226,6 +280,44 @@ function Get-CIPPTenantAlignment {
                             [PSCustomObject]@{
                                 StandardId       = $CAStandardId
                                 ReportingEnabled = $CAReportingEnabled
+                                MissingTemplate  = Get-MissingTemplateMessage -Kind 'Conditional Access' -Reference $CATemplate.TemplateList -KnownIds $KnownCATemplateIds
+                            }
+                        }
+
+                        if ($CATemplate.'TemplateList-Tags') {
+                            foreach ($Tag in $CATemplate.'TemplateList-Tags') {
+                                Write-Host "Processing CA Tag: $($Tag.value)"
+                                $CAActions = if ($CATemplate.action) { $CATemplate.action } else { @() }
+                                $CAReportingEnabled = ($CAActions | Where-Object { $_.value -and ($_.value.ToLower() -eq 'report' -or $_.value.ToLower() -eq 'remediate') }).Count -gt 0
+                                $TagValue = if ($Tag.value) { $Tag.value } else { $Tag }
+                                $TagTemplate = if ($CATemplatesByPackage.ContainsKey($TagValue)) { $CATemplatesByPackage[$TagValue] } else { @() }
+                                $TagTemplate | ForEach-Object {
+                                    # RowKey, not the GUID column - must match the id the standards engine
+                                    # deploys with and writes the compare row under (see Intune block above)
+                                    $TagStandardId = "standards.ConditionalAccessTemplate.$($_.RowKey)"
+                                    [PSCustomObject]@{
+                                        StandardId       = $TagStandardId
+                                        ReportingEnabled = $CAReportingEnabled
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                # Handle Reusable Settings templates — TemplateList is multi-select, one key per template id
+                elseif ($StandardKey -eq 'ReusableSettingsTemplate' -and $StandardConfig) {
+                    foreach ($RSTemplate in @($StandardConfig)) {
+                        $RSActions = if ($RSTemplate.action) { $RSTemplate.action } else { @() }
+                        $RSReportingEnabled = ($RSActions | Where-Object { $_.value -and ($_.value.ToLower() -eq 'report' -or $_.value.ToLower() -eq 'remediate') }).Count -gt 0
+                        foreach ($RSReference in @($RSTemplate.TemplateList)) {
+                            $RSTemplateId = if ($RSReference.value) { [string]$RSReference.value } else { [string]$RSReference }
+                            if ($RSTemplateId) {
+                                $RSLookup = if ($RSReference.value) { $RSReference } else { [PSCustomObject]@{ value = $RSTemplateId; label = $null } }
+                                [PSCustomObject]@{
+                                    StandardId       = "standards.ReusableSettingsTemplate.$RSTemplateId"
+                                    ReportingEnabled = $RSReportingEnabled
+                                    MissingTemplate  = Get-MissingTemplateMessage -Kind 'Reusable settings' -Reference $RSLookup -KnownIds $KnownReusableTemplateIds
+                                }
                             }
                         }
                     }
@@ -251,8 +343,16 @@ function Get-CIPPTenantAlignment {
                 }
             }
 
-            $AllStandards = $StandardsData.StandardId
-            $AllStandardsArray = @($AllStandards)
+            if (-not $StandardsData) { continue }
+            $MissingTemplateMessages = @{}
+            foreach ($Entry in @($StandardsData)) {
+                if ($Entry.PSObject.Properties['MissingTemplate'] -and $Entry.MissingTemplate -and $Entry.StandardId) {
+                    $MissingTemplateMessages[[string]$Entry.StandardId] = [string]$Entry.MissingTemplate
+                }
+            }
+            $AllStandards = @($StandardsData.StandardId | Where-Object { $_ })
+            if ($AllStandards.Count -eq 0) { continue }
+            $AllStandardsArray = $AllStandards
             $ReportingDisabledStandards = ($StandardsData | Where-Object { -not $_.ReportingEnabled }).StandardId
             $ReportingDisabledSet = [System.Collections.Generic.HashSet[string]]::new()
             foreach ($item in $ReportingDisabledStandards) { [void]$ReportingDisabledSet.Add($item) }
@@ -278,6 +378,28 @@ function Get-CIPPTenantAlignment {
                 $LatestDataCollection = $null
                 # Cache hashtable lookup
                 $CurrentTenantStandards = $TenantStandards[$TenantName]
+                $IsDriftTemplate = $Template.type -eq 'drift'
+
+                # Load tenant drift deviation statuses once per tenant (used for drift score normalization)
+                $TenantDriftStatuses = @{}
+                if ($IsDriftTemplate) {
+                    if (-not $TenantDriftStatusesCache.ContainsKey($TenantName)) {
+                        try {
+                            $DriftFilter = "PartitionKey eq '$TenantName'"
+                            $DriftEntities = Get-CIPPAzDataTableEntity @DriftTable -Filter $DriftFilter
+                            foreach ($DriftEntity in $DriftEntities) {
+                                if ($DriftEntity.StandardName) {
+                                    $TenantDriftStatuses[$DriftEntity.StandardName] = $DriftEntity.Status
+                                }
+                            }
+                        } catch {
+                            Write-Warning "Failed to get drift states for $TenantName $($_.Exception.Message)"
+                        }
+                        $TenantDriftStatusesCache[$TenantName] = $TenantDriftStatuses
+                    } else {
+                        $TenantDriftStatuses = $TenantDriftStatusesCache[$TenantName]
+                    }
+                }
 
                 # Pre-allocate list with capacity
                 $ComparisonResults = [System.Collections.Generic.List[object]]::new($AllStandardsArray.Count)
@@ -289,6 +411,23 @@ function Get-CIPPTenantAlignment {
                     # Use HashSet for Contains
                     $IsReportingDisabled = $ReportingDisabledSet.Contains($StandardKey)
                     # Use cached tenant data
+
+                    # A standard pointing at a deleted template never gets a report row. Say so,
+                    # naming the template, instead of reporting NOT FOUND until the end of time.
+                    if ($MissingTemplateMessages.ContainsKey($StandardKey)) {
+                        $ComparisonResults.Add([PSCustomObject]@{
+                                StandardName      = $StandardKey
+                                Compliant         = $false
+                                StandardValue     = $MissingTemplateMessages[$StandardKey]
+                                ComplianceStatus  = if ($IsReportingDisabled) { 'Reporting Disabled' } else { 'Non-Compliant' }
+                                ReportingDisabled = $IsReportingDisabled
+                                LicenseAvailable  = $null
+                                CurrentValue      = $MissingTemplateMessages[$StandardKey]
+                                ExpectedValue     = $null
+                                TemplateMissing   = $true
+                            })
+                        continue
+                    }
 
                     $HasStandard = $StandardKey -and $CurrentTenantStandards.ContainsKey($StandardKey)
 
@@ -354,11 +493,68 @@ function Get-CIPPTenantAlignment {
                 $LicenseMissingStandards = 0
                 $ReportingDisabledStandardsCount = 0
 
+                # Initialize deviation counts before ComparisonResults loop so standards can be counted too
+                $PendingDeviationsCount = $null
+                $DeniedDeviationsCount = $null
+                if ($IsDriftTemplate) {
+                    $PendingDeviationsCount = 0
+                    $DeniedDeviationsCount = 0
+                }
+
                 foreach ($item in $ComparisonResults) {
-                    if ($item.ComplianceStatus -eq 'Compliant') { $CompliantStandards++ }
-                    elseif ($item.ComplianceStatus -eq 'Non-Compliant') { $NonCompliantStandards++ }
-                    elseif ($item.ComplianceStatus -eq 'License Missing') { $LicenseMissingStandards++ }
+                    $IsAcceptedDeviation = $false
+                    $DeviationStatus = $null
+                    if ($IsDriftTemplate -and $item.ComplianceStatus -eq 'Non-Compliant') {
+                        $DeviationStatus = $TenantDriftStatuses[$item.StandardName]
+                        $IsAcceptedDeviation = $DeviationStatus -in @('Accepted', 'CustomerSpecific')
+                    }
+
+                    # Update the item's compliance status and add deviation info for granular consumers
+                    if ($IsAcceptedDeviation) {
+                        $item.ComplianceStatus = if ($DeviationStatus -eq 'Accepted') { 'Accepted Deviation' } else { 'Customer Specific' }
+                    }
+                    if ($DeviationStatus) {
+                        $item | Add-Member -NotePropertyName 'DeviationStatus' -NotePropertyValue $DeviationStatus -Force
+                    }
+
+                    if ($item.ComplianceStatus -in @('Compliant', 'Accepted Deviation', 'Customer Specific')) { $CompliantStandards++ }
+                    elseif ($item.ComplianceStatus -eq 'Non-Compliant') {
+                        $NonCompliantStandards++
+                        # Count non-compliant standards as pending/denied based on drift status
+                        if ($IsDriftTemplate) {
+                            if (-not $DeviationStatus -or $DeviationStatus -eq 'New') {
+                                $PendingDeviationsCount++
+                            } elseif ($DeviationStatus -in @('Denied', 'DeniedRemediate', 'DeniedDelete')) {
+                                $DeniedDeviationsCount++
+                            }
+                        }
+                    } elseif ($item.ComplianceStatus -eq 'License Missing') { $LicenseMissingStandards++ }
                     if ($item.ReportingDisabled) { $ReportingDisabledStandardsCount++ }
+                }
+
+                # For drift templates, include all policy deviation entries from tenantDrift table in alignment score
+                # Accepted/CustomerSpecific count as compliant, all others (New, Denied, etc.) count as non-compliant
+                if ($IsDriftTemplate) {
+                    $PolicyDeviationCompliant = 0
+                    $PolicyDeviationNonCompliant = 0
+                    foreach ($DriftKey in $TenantDriftStatuses.Keys) {
+                        if ($DriftKey -like 'IntuneTemplates.*' -or $DriftKey -like 'ConditionalAccessTemplates.*') {
+                            $DriftStatus = $TenantDriftStatuses[$DriftKey]
+                            if ($DriftStatus -in @('Accepted', 'CustomerSpecific')) {
+                                $PolicyDeviationCompliant++
+                            } else {
+                                $PolicyDeviationNonCompliant++
+                                if ($DriftStatus -eq 'New') {
+                                    $PendingDeviationsCount++
+                                } else {
+                                    $DeniedDeviationsCount++
+                                }
+                            }
+                        }
+                    }
+                    $AllCount += $PolicyDeviationCompliant + $PolicyDeviationNonCompliant
+                    $CompliantStandards += $PolicyDeviationCompliant
+                    $NonCompliantStandards += $PolicyDeviationNonCompliant
                 }
 
                 $AlignmentPercentage = if (($AllCount - $ReportingDisabledStandardsCount) -gt 0) {
@@ -390,6 +586,8 @@ function Get-CIPPTenantAlignment {
                     LicenseMissingStandards  = $LicenseMissingStandards
                     TotalStandards           = $AllCount
                     ReportingDisabledCount   = $ReportingDisabledStandardsCount
+                    PendingDeviationsCount   = $PendingDeviationsCount
+                    DeniedDeviationsCount    = $DeniedDeviationsCount
                     LatestDataCollection     = if ($LatestDataCollection) { $LatestDataCollection } else { $null }
                     ComparisonDetails        = $ComparisonResults
                 }
